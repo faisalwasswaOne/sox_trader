@@ -7,6 +7,8 @@ from plotly.subplots import make_subplots
 import ta
 from datetime import datetime, timedelta
 import warnings
+import time
+import random
 warnings.filterwarnings('ignore')
 
 # Page configuration
@@ -74,6 +76,9 @@ INDICES = {
     "DAX": "^GDAXI"
 }
 
+# Deployment configuration - set to False to always use fallback in production
+ENABLE_DYNAMIC_MARKET_CAP = True
+
 # Static fallback list in case API fails
 FALLBACK_FTSE100_COMPANIES = {
     "AstraZeneca": "AZN.L",
@@ -121,6 +126,16 @@ FTSE100_CONSTITUENTS = {
 @st.cache_data(ttl=604800)  # Cache for 1 week (604800 seconds)
 def get_top5_ftse100_companies():
     """Dynamically fetch top 5 FTSE 100 companies by market cap."""
+    
+    # Check if dynamic fetching is disabled
+    if not ENABLE_DYNAMIC_MARKET_CAP:
+        st.info("🔧 Dynamic market cap fetching is disabled. Using fallback list.")
+        return {
+            'companies': FALLBACK_FTSE100_COMPANIES,
+            'market_caps': {},
+            'updated_at': 'Disabled - using fallback'
+        }
+    
     try:
         company_data = []
         
@@ -128,12 +143,42 @@ def get_top5_ftse100_companies():
         with st.spinner("🔄 Updating top 5 FTSE 100 companies based on current market cap..."):
             for i, (name, ticker) in enumerate(FTSE100_CONSTITUENTS.items()):
                 try:
-                    # Get company info including market cap
-                    company = yf.Ticker(ticker)
-                    info = company.info
+                    # Add random delay to avoid rate limiting (0.5-1.5 seconds)
+                    time.sleep(random.uniform(0.5, 1.5))
                     
-                    if 'marketCap' in info and info['marketCap']:
-                        market_cap = info['marketCap']
+                    # Get company info including market cap with retry logic
+                    company = yf.Ticker(ticker)
+                    
+                    # Try multiple attempts with exponential backoff
+                    max_retries = 3
+                    for attempt in range(max_retries):
+                        try:
+                            info = company.info
+                            break
+                        except Exception as retry_error:
+                            if attempt == max_retries - 1:
+                                raise retry_error
+                            wait_time = (2 ** attempt) + random.uniform(0, 1)
+                            time.sleep(wait_time)
+                    
+                    # Try multiple field names for market cap
+                    market_cap = None
+                    for field in ['marketCap', 'market_cap', 'MarketCap']:
+                        if field in info and info[field] and info[field] > 0:
+                            market_cap = info[field]
+                            break
+                    
+                    # If no market cap found, try alternative calculation
+                    if not market_cap and 'sharesOutstanding' in info and info['sharesOutstanding']:
+                        try:
+                            hist = company.history(period="1d", interval="1d")
+                            if not hist.empty:
+                                current_price = hist['Close'].iloc[-1]
+                                market_cap = info['sharesOutstanding'] * current_price
+                        except:
+                            pass
+                    
+                    if market_cap and market_cap > 0:
                         company_data.append({
                             'name': name,
                             'ticker': ticker,
@@ -165,19 +210,21 @@ def get_top5_ftse100_companies():
             return result
         else:
             st.warning("⚠️ Could not fetch market cap data. Using fallback list.")
+            st.info("💡 This may be due to network restrictions in the deployment environment. The fallback list contains major FTSE 100 companies.")
             return {
                 'companies': FALLBACK_FTSE100_COMPANIES,
                 'market_caps': {},
-                'updated_at': 'Fallback data'
+                'updated_at': 'Fallback data (deployment environment)'
             }
             
     except Exception as e:
         st.error(f"Error updating top 5 companies: {e}")
         st.info("Using fallback list of top 5 FTSE 100 companies.")
+        st.info("💡 This may be due to network restrictions in the deployment environment. The fallback list contains major FTSE 100 companies.")
         return {
             'companies': FALLBACK_FTSE100_COMPANIES,
             'market_caps': {},
-            'updated_at': 'Error - using fallback'
+            'updated_at': 'Error - using fallback (deployment environment)'
         }
 
 # Get dynamic top 5 companies
